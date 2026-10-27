@@ -1,0 +1,6 @@
+{
+  "name": "ConcoursDev Maroc",
+  "description": "Plateforme intelligente de préparation aux concours de la fonction publique marocaine (profils informatiques, techniciens et ingénieurs). Plans d'études dynamiques basés sur les annales réelles, cours, QCM et suivi adaptatif.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

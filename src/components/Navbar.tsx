@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { UserProfile } from '../types';
 import { storageService, DEFAULT_CANDIDATE, DEFAULT_ADMIN } from '../services/storage';
+import { supabaseAuthService } from '../services/supabaseAuthService';
 
 interface NavbarProps {
   currentTab: string;
@@ -197,7 +198,18 @@ export const Navbar: React.FC<NavbarProps> = ({
                       className="w-full text-left px-3 py-1.5 text-slate-600 hover:bg-slate-50 flex items-center space-x-2"
                     >
                       <RefreshCw className="w-3.5 h-3.5 text-slate-400" />
-                      <span>Changer d'utilisateur / Se connecter</span>
+                      <span>Connexion / Changer de compte</span>
+                    </button>
+                    <button
+                      onClick={async () => {
+                        setUserDropdownOpen(false);
+                        await supabaseAuthService.logout();
+                        onUserChange(DEFAULT_CANDIDATE);
+                      }}
+                      className="w-full text-left px-3 py-1.5 text-rose-600 hover:bg-rose-50 flex items-center space-x-2"
+                    >
+                      <LogOut className="w-3.5 h-3.5 text-rose-500" />
+                      <span>Déconnexion</span>
                     </button>
                   </div>
                 </div>

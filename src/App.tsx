@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Navbar } from './components/Navbar';
 import { Footer } from './components/Footer';
 import { AuthModal } from './components/AuthModal';
+import { ResetPasswordModal } from './components/ResetPasswordModal';
 import { AnalysisModal } from './components/AnalysisModal';
 import { LandingPage } from './pages/LandingPage';
 import { OnboardingWizard } from './pages/OnboardingWizard';
@@ -20,11 +21,15 @@ import { LegalPrivacyPage } from './pages/LegalPrivacyPage';
 import { UserProfile, StudyPlan, QuizAttempt } from './types';
 import { storageService, DEFAULT_CANDIDATE } from './services/storage';
 import { studyPlanGeneratorService } from './services/studyPlanGeneratorService';
+import { supabaseAuthService } from './services/supabaseAuthService';
+import { supabaseDbService } from './services/supabaseDbService';
+import { supabase } from './services/supabaseClient';
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<UserProfile>(() => storageService.getCurrentUser());
   const [currentTab, setCurrentTab] = useState<string>('landing');
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [isResetPasswordModalOpen, setIsResetPasswordModalOpen] = useState(false);
   const [isAnalysisModalOpen, setIsAnalysisModalOpen] = useState(false);
   const [pendingUserForPlan, setPendingUserForPlan] = useState<UserProfile | null>(null);
 
@@ -39,19 +44,82 @@ export default function App() {
   const [studyPlan, setStudyPlan] = useState<StudyPlan | null>(() => {
     const plans = storageService.getStudyPlansForUser(currentUser.id);
     if (plans.length > 0) return plans[0];
-    // Generate default seed plan for demo user
     return studyPlanGeneratorService.generatePlan(currentUser);
   });
 
+  // Supabase Auth Session Restoration & URL hash checks
+  useEffect(() => {
+    let isMounted = true;
+
+    async function initSession() {
+      const restoredUser = await supabaseAuthService.restoreSession();
+      if (isMounted && restoredUser) {
+        setCurrentUser(restoredUser);
+        const plans = await supabaseDbService.getStudyPlansForUser(restoredUser.id);
+        if (plans.length > 0) {
+          setStudyPlan(plans[0]);
+        }
+      }
+    }
+
+    initSession();
+
+    // Check for password recovery callback in URL
+    const hash = window.location.hash || '';
+    if (hash.includes('type=recovery') || hash.includes('reset-password')) {
+      setIsResetPasswordModalOpen(true);
+    }
+
+    // Subscribe to auth state changes if Supabase is active
+    if (supabase) {
+      const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+        if (event === 'PASSWORD_RECOVERY') {
+          setIsResetPasswordModalOpen(true);
+        } else if (event === 'SIGNED_IN' && session?.user) {
+          const user = await supabaseAuthService.restoreSession();
+          if (isMounted && user) {
+            setCurrentUser(user);
+          }
+        } else if (event === 'SIGNED_OUT') {
+          if (isMounted) {
+            setCurrentUser(DEFAULT_CANDIDATE);
+          }
+        }
+      });
+
+      return () => {
+        isMounted = false;
+        subscription.unsubscribe();
+      };
+    }
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
   // Keep study plan in sync if user changes
   useEffect(() => {
-    const plans = storageService.getStudyPlansForUser(currentUser.id);
-    if (plans.length > 0) {
-      setStudyPlan(plans[0]);
-    } else {
-      const newPlan = studyPlanGeneratorService.generatePlan(currentUser);
-      setStudyPlan(newPlan);
+    let isMounted = true;
+
+    async function syncUserPlan() {
+      const plans = await supabaseDbService.getStudyPlansForUser(currentUser.id);
+      if (!isMounted) return;
+
+      if (plans.length > 0) {
+        setStudyPlan(plans[0]);
+      } else {
+        const newPlan = studyPlanGeneratorService.generatePlan(currentUser);
+        await supabaseDbService.saveStudyPlan(newPlan);
+        if (isMounted) setStudyPlan(newPlan);
+      }
     }
+
+    syncUserPlan();
+
+    return () => {
+      isMounted = false;
+    };
   }, [currentUser.id]);
 
   const handleStartOnboarding = () => {
@@ -64,10 +132,12 @@ export default function App() {
     setIsAnalysisModalOpen(true);
   };
 
-  const handleAnalysisComplete = () => {
+  const handleAnalysisComplete = async () => {
     setIsAnalysisModalOpen(false);
     if (pendingUserForPlan) {
       const newPlan = studyPlanGeneratorService.generatePlan(pendingUserForPlan);
+      await supabaseDbService.saveStudyPlan(newPlan);
+      await supabaseDbService.updateProfile(pendingUserForPlan);
       setStudyPlan(newPlan);
       setPendingUserForPlan(null);
       setCurrentTab('plan');
@@ -86,8 +156,11 @@ export default function App() {
     setCurrentTab('quiz');
   };
 
-  const handleQuizCompleted = (attempt: QuizAttempt) => {
+  const handleQuizCompleted = async (attempt: QuizAttempt) => {
     setLatestQuizAttempt(attempt);
+
+    // Save attempt to Supabase / local
+    await supabaseDbService.saveQuizAttempt(attempt);
 
     // If active plan has a day with this topic, mark it as completed
     if (studyPlan) {
@@ -107,7 +180,7 @@ export default function App() {
         ...studyPlan,
         days: updatedDays,
       };
-      storageService.saveStudyPlan(updatedPlan);
+      await supabaseDbService.saveStudyPlan(updatedPlan);
       setStudyPlan(updatedPlan);
     }
 
@@ -125,6 +198,7 @@ export default function App() {
     storageService.setCurrentUser(freshUser);
     setCurrentUser(freshUser);
     const freshPlan = studyPlanGeneratorService.generatePlan(freshUser);
+    supabaseDbService.saveStudyPlan(freshPlan);
     setStudyPlan(freshPlan);
     setCurrentTab('dashboard');
   };
@@ -165,7 +239,10 @@ export default function App() {
           <StudyPlanPage
             currentUser={currentUser}
             studyPlan={studyPlan}
-            onPlanUpdated={setStudyPlan}
+            onPlanUpdated={async (updatedPlan) => {
+              setStudyPlan(updatedPlan);
+              await supabaseDbService.saveStudyPlan(updatedPlan);
+            }}
             onOpenLesson={handleOpenLesson}
             onOpenQuiz={handleOpenQuiz}
             onStartOnboarding={handleStartOnboarding}
@@ -231,7 +308,10 @@ export default function App() {
         {currentTab === 'profile' && (
           <ProfileSettingsPage
             currentUser={currentUser}
-            onUserUpdated={setCurrentUser}
+            onUserUpdated={async (u) => {
+              setCurrentUser(u);
+              await supabaseDbService.updateProfile(u);
+            }}
             onResetData={handleResetData}
           />
         )}
@@ -251,6 +331,16 @@ export default function App() {
         onLoginSuccess={(user) => {
           setCurrentUser(user);
           setCurrentTab('dashboard');
+        }}
+      />
+
+      {/* Password Reset Modal */}
+      <ResetPasswordModal
+        isOpen={isResetPasswordModalOpen}
+        onClose={() => setIsResetPasswordModalOpen(false)}
+        onSuccess={() => {
+          setIsResetPasswordModalOpen(false);
+          setIsAuthModalOpen(true);
         }}
       />
 

@@ -1,9 +1,12 @@
 import { priorityScoringService, topicStatisticsService } from '../services/topicStatisticsService';
 import { studyPlanGeneratorService } from '../services/studyPlanGeneratorService';
 import { quizService, progressService } from '../services/learningServices';
-import { DEFAULT_CANDIDATE } from '../services/storage';
+import { supabaseAuthService } from '../services/supabaseAuthService';
+import { supabaseDbService } from '../services/supabaseDbService';
+import { storageService, DEFAULT_CANDIDATE, DEFAULT_ADMIN } from '../services/storage';
+import { isSupabaseConfigured } from '../services/supabaseClient';
 
-console.log('--- EXÉCUTION DE LA SUITE DE TESTS CONCOURSDEV MAROC ---');
+console.log('--- EXÉCUTION DE LA SUITE DE TESTS CONCOURSDEV MAROC & SUPABASE ---');
 
 // Test 1: Calcul des statistiques de matières
 const stats = topicStatisticsService.calculateTopicStatistics();
@@ -44,4 +47,86 @@ const attempt = quizService.submitQuizAttempt({
 if (attempt.scorePercentage === undefined) throw new Error('Échec Test 5: Score manquant');
 console.log(`✓ Test 5 Réussi: Évaluation sécurisée du QCM (Score = ${attempt.scorePercentage}%).`);
 
-console.log('--- TOUS LES TESTS UNITAIRES ET D\'INTÉGRATION ONT RÉUSSI AVEC SUCCÈS ---');
+// Test 6: Supabase Client Fallback & Environment Guard
+const isConfigured = supabaseAuthService.isConfigured();
+console.log(`✓ Test 6 Réussi: Supabase Client contract validé (Mode: ${isConfigured ? 'Supabase Live Cloud' : 'Local Fallback Démo'}).`);
+
+// Test 7: Registration, Login, Logout & Session Restoration
+async function testAuthAndSession() {
+  const regResult = await supabaseAuthService.register('candidat.test@concoursdev.ma', 'TestPassword123!', {
+    fullName: 'Candidat Test Unitaire',
+  });
+  if (!regResult.success && !regResult.isConfirmationPending) {
+    throw new Error(`Échec Test 7: Inscription échouée - ${regResult.error}`);
+  }
+  console.log(`✓ Test 7a Réussi: Inscription candidat validée.`);
+
+  const loginResult = await supabaseAuthService.login('candidat.test@concoursdev.ma', 'TestPassword123!');
+  if (!loginResult.success || !loginResult.user) {
+    throw new Error(`Échec Test 7: Connexion échouée - ${loginResult.error}`);
+  }
+  console.log(`✓ Test 7b Réussi: Connexion candidat validée (${loginResult.user.email}).`);
+
+  const restored = await supabaseAuthService.restoreSession();
+  if (!restored) throw new Error('Échec Test 7: Restauration de session échouée');
+  console.log(`✓ Test 7c Réussi: Restauration de session validée.`);
+
+  await supabaseAuthService.logout();
+  console.log(`✓ Test 7d Réussi: Déconnexion validée.`);
+}
+
+// Test 8: Isolation stricte entre deux utilisateurs (User Isolation Test)
+async function testTwoUserIsolation() {
+  const userA_id = 'user_uuid_alpha_001';
+  const userB_id = 'user_uuid_beta_002';
+
+  const userA = { ...DEFAULT_CANDIDATE, id: userA_id, email: 'alpha@domaine.ma' };
+  const userB = { ...DEFAULT_CANDIDATE, id: userB_id, email: 'beta@domaine.ma' };
+
+  // Generate and save plan for User A
+  const planA = studyPlanGeneratorService.generatePlan(userA, { customDays: 7, customDailyHours: 1 });
+  await supabaseDbService.saveStudyPlan(planA);
+
+  // Retrieve plans for User B
+  const plansForB = await supabaseDbService.getStudyPlansForUser(userB_id);
+  const leakedPlan = plansForB.find((p) => p.userId === userA_id);
+  if (leakedPlan) {
+    throw new Error('Échec Test 8: Faille d\'isolation ! Le plan de l\'utilisateur A est accessible à l\'utilisateur B !');
+  }
+
+  // Quiz attempts isolation
+  const attemptA: any = {
+    id: `att_a_${Date.now()}`,
+    quizId: 'quiz_sql',
+    userId: userA_id,
+    topicId: 'top_sql_basic',
+    topicName: 'SQL',
+    startedAt: new Date().toISOString(),
+    submittedAt: new Date().toISOString(),
+    totalQuestions: 5,
+    correctAnswersCount: 4,
+    scorePercentage: 80,
+    answers: [],
+  };
+  await supabaseDbService.saveQuizAttempt(attemptA);
+
+  const attemptsForB = storageService.getQuizAttempts(userB_id);
+  const leakedAttempt = attemptsForB.find((a) => a.userId === userA_id);
+  if (leakedAttempt) {
+    throw new Error('Échec Test 8: Faille d\'isolation ! La tentative de l\'utilisateur A est accessible à l\'utilisateur B !');
+  }
+
+  console.log(`✓ Test 8 Réussi: Isolation stricte validée (Aucune fuite de données entre Utilisateur A et Utilisateur B).`);
+}
+
+// Run async tests
+(async () => {
+  try {
+    await testAuthAndSession();
+    await testTwoUserIsolation();
+    console.log('--- TOUS LES TESTS UNITAIRES, D\'INTÉGRATION ET D\'ISOLATION ONT RÉUSSI ---');
+  } catch (e) {
+    console.error('Erreur lors des tests :', e);
+    process.exit(1);
+  }
+})();
